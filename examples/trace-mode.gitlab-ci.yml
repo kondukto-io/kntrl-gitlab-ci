@@ -8,9 +8,9 @@
 #   - npm → python (credential harvesting)
 #   - Connections to non-registry hosts from package managers
 
-# Pin to a specific commit SHA for reproducibility (replace <COMMIT_SHA> after first push)
+# Pin to a specific commit SHA for reproducibility (replace 654b9f395e4ad4bdfcc349058baa9fd7192b6e5a after first push)
 include:
-  - remote: 'https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/<COMMIT_SHA>/kntrl.gitlab-ci.yml'
+  - remote: 'https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/654b9f395e4ad4bdfcc349058baa9fd7192b6e5a/kntrl.gitlab-ci.yml'
 
 stages:
   - .pre

@@ -1,0 +1,53 @@
+# ══════════════════════════════════════════════════════════
+# Example: kntrl with custom rules and overrides
+# ══════════════════════════════════════════════════════════
+#
+# Shows advanced configuration: custom blocked chains,
+# network profiles, extra monitored paths, and a custom
+# OPA rego file.
+
+# Pin to a specific commit SHA for reproducibility (replace <COMMIT_SHA> after first push)
+include:
+  - remote: 'https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/<COMMIT_SHA>/kntrl.gitlab-ci.yml'
+
+stages:
+  - .pre
+  - build
+  - test
+  - .post
+
+kntrl-start:
+  extends: .kntrl-start
+  variables:
+    KNTRL_MODE: "trace"
+    # Additional hosts to allow
+    KNTRL_ALLOWED_HOSTS: "maven.example.com,.internal.example.com"
+    # Additional IPs
+    KNTRL_ALLOWED_IPS: "203.0.113.0/24"
+    # Block additional executables
+    KNTRL_EXTRA_BLOCKED_EXECUTABLES: "nmap,masscan,sqlmap"
+    # Monitor additional paths
+    KNTRL_EXTRA_MONITORED_PATHS: "/app/secrets/,.env.production"
+    # Protect additional paths
+    KNTRL_EXTRA_PROTECTED_PATHS: "/etc/hosts,/etc/resolv.conf"
+    # Monitor additional env vars
+    KNTRL_EXTRA_MONITORED_ENV_VARS: "DATABASE_URL,REDIS_URL,API_SECRET"
+    # Custom blocked chains (JSON)
+    KNTRL_EXTRA_BLOCKED_CHAINS: '[{"process":"curl","ancestors":["maven"]},{"process":"wget","ancestors":["gradle"]}]'
+    # Custom network profiles (JSON)
+    KNTRL_NETWORK_PROFILES: '[{"process":"maven","allowed_hosts":["repo1.maven.org",".maven.org"]}]'
+    # Custom rego file
+    KNTRL_CUSTOM_REGO_FILE: ".kntrl/custom_rules.rego"
+
+build:
+  stage: build
+  script:
+    - mvn clean install
+
+test:
+  stage: test
+  script:
+    - mvn test
+
+kntrl-stop:
+  extends: .kntrl-stop

@@ -1,0 +1,52 @@
+# ══════════════════════════════════════════════════════════
+# Example: kntrl in Trace mode (enforce/block)
+# ══════════════════════════════════════════════════════════
+#
+# This example shows how to use kntrl in trace mode to
+# actively block suspicious activity like:
+#   - npm → curl (data exfiltration)
+#   - npm → python (credential harvesting)
+#   - Connections to non-registry hosts from package managers
+
+# Pin to a specific commit SHA for reproducibility (replace <COMMIT_SHA> after first push)
+include:
+  - remote: 'https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/<COMMIT_SHA>/kntrl.gitlab-ci.yml'
+
+stages:
+  - .pre
+  - build
+  - test
+  - .post
+
+# Start kntrl in trace (enforce) mode
+kntrl-start:
+  extends: .kntrl-start
+  variables:
+    KNTRL_MODE: "trace"
+    KNTRL_ALLOWED_HOSTS: "api.gitlab.com,my-internal-registry.example.com"
+
+# Normal jobs — kntrl will monitor and block suspicious behavior
+npm-build:
+  stage: build
+  script:
+    - npm install
+    - npm run build
+
+npm-test:
+  stage: test
+  script:
+    - npm test
+
+pip-install:
+  stage: build
+  script:
+    - pip install -r requirements.txt
+
+python-test:
+  stage: test
+  script:
+    - python -m pytest
+
+# Stop and report
+kntrl-stop:
+  extends: .kntrl-stop

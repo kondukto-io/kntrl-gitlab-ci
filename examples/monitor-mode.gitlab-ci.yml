@@ -1,0 +1,49 @@
+# ══════════════════════════════════════════════════════════
+# Example: kntrl in Monitor mode (log only, no blocking)
+# ══════════════════════════════════════════════════════════
+#
+# This example shows how to use kntrl to monitor network,
+# process, DNS, and file activity during npm + pip builds
+# without blocking anything.
+
+# Pin to a specific commit SHA for reproducibility (replace <COMMIT_SHA> after first push)
+include:
+  - remote: 'https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/<COMMIT_SHA>/kntrl.gitlab-ci.yml'
+
+stages:
+  - .pre
+  - build
+  - test
+  - .post
+
+# Start kntrl in monitor mode (extends the hidden .kntrl-start job)
+kntrl-start:
+  extends: .kntrl-start
+  variables:
+    KNTRL_MODE: "monitor"
+
+# Your normal build/test jobs
+npm-build:
+  stage: build
+  script:
+    - npm install
+    - npm run build
+
+npm-test:
+  stage: test
+  script:
+    - npm test
+
+pip-install:
+  stage: build
+  script:
+    - pip install -r requirements.txt
+
+python-test:
+  stage: test
+  script:
+    - python -m pytest
+
+# Stop kntrl and print report (extends the hidden .kntrl-stop job)
+kntrl-stop:
+  extends: .kntrl-stop

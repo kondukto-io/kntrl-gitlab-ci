@@ -1,0 +1,476 @@
+# ══════════════════════════════════════════════════════════
+# kntrl — Runtime Security for GitLab CI/CD
+# ══════════════════════════════════════════════════════════
+#
+# Include this file in your .gitlab-ci.yml to add eBPF-based
+# runtime security monitoring and enforcement to your pipeline.
+#
+# Usage (include from remote — pin to a commit SHA for reproducibility):
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/<COMMIT_SHA>/kntrl.gitlab-ci.yml'
+#
+# Usage (include from local, if vendored):
+#   include:
+#     - local: '.kntrl/kntrl.gitlab-ci.yml'
+#
+# Configure via CI/CD variables (Settings > CI/CD > Variables):
+#   KNTRL_MODE:    "monitor" (default) or "trace" (enforce)
+#   KNTRL_VERSION: release version (default: v0.1.15)
+#   See full variable list below.
+#
+# ══════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────
+# Hidden job: Start kntrl agent
+# Runs in .pre stage so it starts before any user jobs.
+# ──────────────────────────────────────────────────────────
+.kntrl-start:
+  stage: .pre
+  tags:
+    - linux
+  variables:
+    # ── General ──
+    KNTRL_VERSION: "${KNTRL_VERSION:-v0.1.15}"
+    KNTRL_MODE: "${KNTRL_MODE:-monitor}"
+    # ── Cloud ──
+    KNTRL_API_URL: "${KNTRL_API_URL:-}"
+    KNTRL_API_KEY: "${KNTRL_API_KEY:-}"
+    # ── Default rules toggles ──
+    KNTRL_ENABLE_DEFAULT_NETWORK_RULES: "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES:-true}"
+    KNTRL_ENABLE_DEFAULT_PROCESS_RULES: "${KNTRL_ENABLE_DEFAULT_PROCESS_RULES:-true}"
+    KNTRL_ENABLE_DEFAULT_DNS_RULES: "${KNTRL_ENABLE_DEFAULT_DNS_RULES:-true}"
+    KNTRL_ENABLE_DEFAULT_FILE_RULES: "${KNTRL_ENABLE_DEFAULT_FILE_RULES:-true}"
+    KNTRL_ENABLE_DEFAULT_SUPPLY_CHAIN_REGO: "${KNTRL_ENABLE_DEFAULT_SUPPLY_CHAIN_REGO:-true}"
+    # ── Network overrides ──
+    KNTRL_ALLOWED_HOSTS: "${KNTRL_ALLOWED_HOSTS:-}"
+    KNTRL_ALLOWED_IPS: "${KNTRL_ALLOWED_IPS:-}"
+    KNTRL_ALLOW_LOCAL_RANGES: "${KNTRL_ALLOW_LOCAL_RANGES:-true}"
+    KNTRL_ALLOW_GITLAB_META: "${KNTRL_ALLOW_GITLAB_META:-true}"
+    KNTRL_ALLOW_METADATA: "${KNTRL_ALLOW_METADATA:-false}"
+    # ── Process overrides ──
+    KNTRL_EXTRA_BLOCKED_EXECUTABLES: "${KNTRL_EXTRA_BLOCKED_EXECUTABLES:-}"
+    # ── File overrides ──
+    KNTRL_EXTRA_MONITORED_PATHS: "${KNTRL_EXTRA_MONITORED_PATHS:-}"
+    KNTRL_EXTRA_PROTECTED_PATHS: "${KNTRL_EXTRA_PROTECTED_PATHS:-}"
+    KNTRL_EXTRA_MONITORED_ENV_VARS: "${KNTRL_EXTRA_MONITORED_ENV_VARS:-}"
+    # ── Custom rules ──
+    KNTRL_CUSTOM_RULES_FILE: "${KNTRL_CUSTOM_RULES_FILE:-}"
+    KNTRL_CUSTOM_RULES_DIR: "${KNTRL_CUSTOM_RULES_DIR:-}"
+    KNTRL_CUSTOM_REGO_FILE: "${KNTRL_CUSTOM_REGO_FILE:-}"
+    # ── Advanced (JSON) ──
+    KNTRL_NETWORK_PROFILES: "${KNTRL_NETWORK_PROFILES:-}"
+    KNTRL_EXTRA_BLOCKED_CHAINS: "${KNTRL_EXTRA_BLOCKED_CHAINS:-}"
+  script:
+    - |
+      set -euo pipefail
+
+      # ── Install kntrl ──
+      VERSION="${KNTRL_VERSION}"
+      ARCH="$(uname -m)"
+      case "${ARCH}" in
+        x86_64)  ARCH_SUFFIX="amd64" ;;
+        aarch64) ARCH_SUFFIX="arm64" ;;
+        *)       echo "ERROR: Unsupported architecture: ${ARCH}"; exit 1 ;;
+      esac
+
+      if [ "${VERSION}" = "latest" ]; then
+        DOWNLOAD_URL="https://github.com/kondukto-io/kntrl/releases/latest/download/kntrl.${ARCH_SUFFIX}"
+      else
+        DOWNLOAD_URL="https://github.com/kondukto-io/kntrl/releases/download/${VERSION}/kntrl.${ARCH_SUFFIX}"
+      fi
+
+      echo "[kntrl] Installing kntrl (${VERSION}, ${ARCH_SUFFIX})"
+      sudo curl -fsSL -o /usr/local/bin/kntrl "${DOWNLOAD_URL}"
+      sudo chmod +x /usr/local/bin/kntrl
+      echo "[kntrl] Installed: $(kntrl --version 2>&1 || true)"
+
+      # ── Build rules ──
+      RULES_DIR="/tmp/kntrl-rules"
+      mkdir -p "${RULES_DIR}"
+      RULES_FILE="${RULES_DIR}/rules.yaml"
+
+      # Resolve defaults — check vendored path first, then CI component path
+      if [ -d "${CI_PROJECT_DIR}/.kntrl/defaults" ]; then
+        DEFAULTS_DIR="${CI_PROJECT_DIR}/.kntrl/defaults"
+      elif [ -d "${CI_PROJECT_DIR}/defaults" ]; then
+        DEFAULTS_DIR="${CI_PROJECT_DIR}/defaults"
+      else
+        # Download defaults from GitHub (pin KNTRL_GITLAB_CI_SHA to a commit SHA for reproducibility)
+        DEFAULTS_DIR="/tmp/kntrl-defaults"
+        mkdir -p "${DEFAULTS_DIR}"
+        KNTRL_GITLAB_CI_SHA="${KNTRL_GITLAB_CI_SHA:-main}"
+        DEFAULTS_BASE="https://raw.githubusercontent.com/kondukto-io/kntrl-gitlab-ci/${KNTRL_GITLAB_CI_SHA}/defaults"
+        for f in network_hosts.txt network_profiles.txt process_rules.txt file_monitored_paths.txt file_protected_paths.txt file_env_vars.txt supply_chain.rego; do
+          curl -fsSL -o "${DEFAULTS_DIR}/${f}" "${DEFAULTS_BASE}/${f}" 2>/dev/null || true
+        done
+      fi
+
+      csv_to_yaml() {
+        local csv="$1" indent="$2"
+        IFS=',' read -ra items <<< "${csv}"
+        for item in "${items[@]}"; do
+          item="$(echo "${item}" | xargs)"
+          [ -n "${item}" ] && echo "${indent}- \"${item}\""
+        done
+      }
+
+      {
+        echo 'version: "1"'
+        echo "mode: ${KNTRL_MODE}"
+        echo "rules:"
+
+        # ── Network ──
+        echo "  network:"
+
+        if [ "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES}" = "true" ] || [ -n "${KNTRL_ALLOWED_HOSTS}" ]; then
+          echo "    allowed_hosts:"
+          if [ "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES}" = "true" ] && [ -f "${DEFAULTS_DIR}/network_hosts.txt" ]; then
+            cat "${DEFAULTS_DIR}/network_hosts.txt"
+          fi
+          # GitLab-specific hosts
+          echo '      - "gitlab.com"'
+          echo '      - ".gitlab.com"'
+          echo '      - ".gitlab-static.net"'
+          echo '      - "registry.gitlab.com"'
+          if [ -n "${KNTRL_ALLOWED_HOSTS}" ]; then
+            csv_to_yaml "${KNTRL_ALLOWED_HOSTS}" "      "
+          fi
+        fi
+
+        if [ "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES}" = "true" ] || [ -n "${KNTRL_ALLOWED_IPS}" ]; then
+          echo "    allowed_ips:"
+          if [ "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES}" = "true" ]; then
+            echo '      - "10.0.0.0/8"'
+            echo '      - "172.16.0.0/12"'
+            echo '      - "192.168.0.0/16"'
+          fi
+          if [ -n "${KNTRL_ALLOWED_IPS}" ]; then
+            csv_to_yaml "${KNTRL_ALLOWED_IPS}" "      "
+          fi
+        fi
+
+        echo "    allow_local_ranges: ${KNTRL_ALLOW_LOCAL_RANGES}"
+        echo "    allow_github_meta: false"
+        echo "    allow_metadata: ${KNTRL_ALLOW_METADATA}"
+
+        if [ "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES}" = "true" ] || [ -n "${KNTRL_NETWORK_PROFILES}" ]; then
+          echo "    profiles:"
+          if [ "${KNTRL_ENABLE_DEFAULT_NETWORK_RULES}" = "true" ] && [ -f "${DEFAULTS_DIR}/network_profiles.txt" ]; then
+            cat "${DEFAULTS_DIR}/network_profiles.txt"
+          fi
+          if [ -n "${KNTRL_NETWORK_PROFILES}" ]; then
+            python3 -c "
+      import json, sys
+      for p in json.loads(sys.argv[1]):
+          print(f'      - process: \"{p[\"process\"]}\"')
+          print('        allowed_hosts:')
+          for h in p.get('allowed_hosts', []):
+              print(f'          - \"{h}\"')
+      " "${KNTRL_NETWORK_PROFILES}"
+          fi
+        fi
+
+        # ── Process ──
+        if [ "${KNTRL_ENABLE_DEFAULT_PROCESS_RULES}" = "true" ] || [ -n "${KNTRL_EXTRA_BLOCKED_EXECUTABLES}" ] || [ -n "${KNTRL_EXTRA_BLOCKED_CHAINS}" ]; then
+          echo "  process:"
+          echo "    enabled: true"
+
+          if [ "${KNTRL_ENABLE_DEFAULT_PROCESS_RULES}" = "true" ] || [ -n "${KNTRL_EXTRA_BLOCKED_CHAINS}" ]; then
+            echo "    blocked_chains:"
+            if [ "${KNTRL_ENABLE_DEFAULT_PROCESS_RULES}" = "true" ] && [ -f "${DEFAULTS_DIR}/process_rules.txt" ]; then
+              cat "${DEFAULTS_DIR}/process_rules.txt"
+            fi
+            if [ -n "${KNTRL_EXTRA_BLOCKED_CHAINS}" ]; then
+              python3 -c "
+      import json, sys
+      for c in json.loads(sys.argv[1]):
+          print(f'      - process: \"{c[\"process\"]}\"')
+          ancestors = ', '.join(f'\"{a}\"' for a in c['ancestors'])
+          print(f'        ancestors: [{ancestors}]')
+      " "${KNTRL_EXTRA_BLOCKED_CHAINS}"
+            fi
+          fi
+
+          echo "    blocked_executables:"
+          if [ "${KNTRL_ENABLE_DEFAULT_PROCESS_RULES}" = "true" ]; then
+            echo '      - "nc"'
+            echo '      - "ncat"'
+            echo '      - "nmap"'
+            echo '      - "socat"'
+            echo '      - "trufflehog"'
+          fi
+          if [ -n "${KNTRL_EXTRA_BLOCKED_EXECUTABLES}" ]; then
+            csv_to_yaml "${KNTRL_EXTRA_BLOCKED_EXECUTABLES}" "      "
+          fi
+        fi
+
+        # ── DNS ──
+        if [ "${KNTRL_ENABLE_DEFAULT_DNS_RULES}" = "true" ]; then
+          echo "  dns:"
+          echo "    allowed_servers:"
+          echo '      - "8.8.8.8"'
+          echo '      - "8.8.4.4"'
+          echo '      - "1.1.1.1"'
+          echo '      - "1.0.0.1"'
+        fi
+
+        # ── File ──
+        if [ "${KNTRL_ENABLE_DEFAULT_FILE_RULES}" = "true" ] || \
+           [ -n "${KNTRL_EXTRA_MONITORED_PATHS}" ] || \
+           [ -n "${KNTRL_EXTRA_PROTECTED_PATHS}" ] || \
+           [ -n "${KNTRL_EXTRA_MONITORED_ENV_VARS}" ]; then
+          echo "  file:"
+          echo "    enabled: true"
+
+          echo "    monitored_paths:"
+          if [ "${KNTRL_ENABLE_DEFAULT_FILE_RULES}" = "true" ] && [ -f "${DEFAULTS_DIR}/file_monitored_paths.txt" ]; then
+            cat "${DEFAULTS_DIR}/file_monitored_paths.txt"
+          fi
+          if [ -n "${KNTRL_EXTRA_MONITORED_PATHS}" ]; then
+            csv_to_yaml "${KNTRL_EXTRA_MONITORED_PATHS}" "      "
+          fi
+
+          echo "    protected_paths:"
+          if [ "${KNTRL_ENABLE_DEFAULT_FILE_RULES}" = "true" ] && [ -f "${DEFAULTS_DIR}/file_protected_paths.txt" ]; then
+            cat "${DEFAULTS_DIR}/file_protected_paths.txt"
+          fi
+          if [ -n "${KNTRL_EXTRA_PROTECTED_PATHS}" ]; then
+            csv_to_yaml "${KNTRL_EXTRA_PROTECTED_PATHS}" "      "
+          fi
+
+          echo "    monitored_env_vars:"
+          if [ "${KNTRL_ENABLE_DEFAULT_FILE_RULES}" = "true" ] && [ -f "${DEFAULTS_DIR}/file_env_vars.txt" ]; then
+            cat "${DEFAULTS_DIR}/file_env_vars.txt"
+          fi
+          if [ -n "${KNTRL_EXTRA_MONITORED_ENV_VARS}" ]; then
+            csv_to_yaml "${KNTRL_EXTRA_MONITORED_ENV_VARS}" "      "
+          fi
+        fi
+
+        echo "webhooks: []"
+      } > "${RULES_FILE}"
+
+      # OPA rego files
+      if [ "${KNTRL_ENABLE_DEFAULT_SUPPLY_CHAIN_REGO}" = "true" ] && [ -f "${DEFAULTS_DIR}/supply_chain.rego" ]; then
+        cp "${DEFAULTS_DIR}/supply_chain.rego" "${RULES_DIR}/supply_chain.rego"
+      fi
+      if [ -n "${KNTRL_CUSTOM_REGO_FILE}" ] && [ -f "${KNTRL_CUSTOM_REGO_FILE}" ]; then
+        cp "${KNTRL_CUSTOM_REGO_FILE}" "${RULES_DIR}/$(basename "${KNTRL_CUSTOM_REGO_FILE}")"
+      fi
+
+      echo "[kntrl] Generated rules:"
+      cat "${RULES_FILE}"
+
+      # ── Start daemon ──
+      REPORT_FILE="/tmp/kntrl-report.json"
+      KNTRL_ARGS=(
+        start
+        --mode "${KNTRL_MODE}"
+        --rules-dir "${RULES_DIR}"
+        --output-file-name "${REPORT_FILE}"
+      )
+
+      if [ -n "${KNTRL_CUSTOM_RULES_FILE:-}" ] && [ -f "${KNTRL_CUSTOM_RULES_FILE}" ]; then
+        KNTRL_ARGS+=(--rules-file "${KNTRL_CUSTOM_RULES_FILE}")
+      fi
+      if [ -n "${KNTRL_CUSTOM_RULES_DIR:-}" ] && [ -d "${KNTRL_CUSTOM_RULES_DIR}" ]; then
+        cp -r "${KNTRL_CUSTOM_RULES_DIR}"/* "${RULES_DIR}/" 2>/dev/null || true
+      fi
+
+      if [ -n "${KNTRL_API_URL}" ]; then
+        export KNTRL_API_URL="${KNTRL_API_URL}"
+      fi
+      if [ -n "${KNTRL_API_KEY}" ]; then
+        export KNTRL_API_KEY="${KNTRL_API_KEY}"
+      fi
+
+      KNTRL_LOG="/tmp/kntrl-daemon.log"
+      echo "[kntrl] Starting agent: sudo kntrl ${KNTRL_ARGS[*]}"
+      sudo -E nohup kntrl "${KNTRL_ARGS[@]}" > "${KNTRL_LOG}" 2>&1 &
+      KNTRL_PID=$!
+      echo "${KNTRL_PID}" | sudo tee /var/run/kntrl.pid > /dev/null
+
+      sleep 2
+
+      if kill -0 "${KNTRL_PID}" 2>/dev/null; then
+        echo "[kntrl] Agent started (pid: ${KNTRL_PID})"
+      else
+        echo "ERROR: kntrl agent failed to start. Log:"
+        cat "${KNTRL_LOG}" || true
+        exit 1
+      fi
+
+# ──────────────────────────────────────────────────────────
+# Hidden job: Stop kntrl agent and print report
+# Runs in .post stage so it runs after all user jobs.
+# ──────────────────────────────────────────────────────────
+.kntrl-stop:
+  stage: .post
+  tags:
+    - linux
+  variables:
+    KNTRL_REPORT_FILE: /tmp/kntrl-report.json
+  when: always
+  script:
+    - |
+      set -uo pipefail
+
+      REPORT_FILE="${KNTRL_REPORT_FILE}"
+      EXIT_CODE=0
+
+      echo "[kntrl] Stopping agent"
+      if [ -f /var/run/kntrl.pid ]; then
+        KNTRL_PID=$(cat /var/run/kntrl.pid)
+        sudo kill "${KNTRL_PID}" 2>/dev/null || true
+        for i in $(seq 1 10); do
+          kill -0 "${KNTRL_PID}" 2>/dev/null || break
+          sleep 0.5
+        done
+        sudo rm -f /var/run/kntrl.pid
+      else
+        sudo kntrl stop 2>&1 || EXIT_CODE=$?
+      fi
+
+      KNTRL_LOG="/tmp/kntrl-daemon.log"
+      if [ -f "${KNTRL_LOG}" ] && [ -s "${KNTRL_LOG}" ]; then
+        echo "--- kntrl daemon log ---"
+        cat "${KNTRL_LOG}"
+        echo "--- end daemon log ---"
+      fi
+
+      if [ -f "${REPORT_FILE}" ] && [ -s "${REPORT_FILE}" ]; then
+        python3 << 'PYEOF'
+      import json, sys, os
+
+      report_file = os.environ.get("KNTRL_REPORT_FILE", "/tmp/kntrl-report.json")
+      network, process, dns, file_events = [], [], [], []
+
+      with open(report_file) as f:
+          for line in f:
+              line = line.strip()
+              if not line:
+                  continue
+              try:
+                  ev = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+
+              if "proto" in ev and "daddr" in ev:
+                  network.append(ev)
+              elif "event_type" in ev and "ppid" in ev:
+                  process.append(ev)
+              elif "dns_server" in ev and "query_domain" in ev:
+                  dns.append(ev)
+              elif "filename" in ev and ("policy" in ev or "operation" in ev):
+                  file_events.append(ev)
+
+      has_events = network or process or dns or file_events
+
+      if not has_events:
+          print("No events captured.")
+          sys.exit(0)
+
+      net_pass = sum(1 for e in network if e.get("policy") == "pass")
+      net_block = sum(1 for e in network if e.get("policy") == "block")
+      proc_block = sum(1 for e in process if e.get("policy") == "block")
+      file_block = sum(1 for e in file_events if e.get("blocked"))
+
+      print("=" * 70)
+      print("  kntrl Runtime Security Report")
+      print("=" * 70)
+      print(f"  Network events: {len(network):>5}  (pass: {net_pass}, block: {net_block})")
+      print(f"  Process events: {len(process):>5}  (blocked: {proc_block})")
+      print(f"  DNS events:     {len(dns):>5}")
+      print(f"  File events:    {len(file_events):>5}  (blocked: {file_block})")
+      print("=" * 70)
+
+      if network:
+          print("\n--- Network Connections ---")
+          print(f"{'PID':<8} {'Process':<16} {'Proto':<6} {'Destination':<32} {'Domain':<35} {'Policy':<8}")
+          print("-" * 105)
+          for ev in network:
+              domains = ", ".join(ev.get("domains", [])) or "."
+              dest = f"{ev.get('daddr', '?')}:{ev.get('dport', '?')}"
+              policy = ev.get("policy", "?")
+              marker = ">> " if policy == "block" else "   "
+              print(f"{marker}{ev.get('pid', '?'):<5} {ev.get('task_name', '?'):<16} {ev.get('proto', '?'):<6} {dest:<32} {domains:<35} {policy:<8}")
+
+      if dns:
+          seen = set()
+          unique_dns = []
+          for ev in dns:
+              key = (ev.get("query_domain", ""), ev.get("dns_server", ""))
+              if key not in seen and key[0]:
+                  seen.add(key)
+                  unique_dns.append(ev)
+          if unique_dns:
+              print(f"\n--- DNS Queries ({len(unique_dns)} unique) ---")
+              print(f"{'Domain':<50} {'DNS Server':<20}")
+              print("-" * 70)
+              for ev in unique_dns:
+                  print(f"{ev.get('query_domain', '?'):<50} {ev.get('dns_server', '?'):<20}")
+
+      if process:
+          execs = [e for e in process if e.get("event_type") == "exec"]
+          if execs:
+              print(f"\n--- Process Executions ({len(execs)} exec events) ---")
+              print(f"{'PID':<8} {'PPID':<8} {'Comm':<16} {'Args':<50} {'Policy':<8}")
+              print("-" * 90)
+              for ev in execs:
+                  policy = ev.get("policy", "")
+                  marker = ">> " if policy == "block" else "   "
+                  args = ev.get("args", "") or ev.get("comm", "?")
+                  if len(args) > 50:
+                      args = args[:47] + "..."
+                  print(f"{marker}{ev.get('pid', '?'):<5} {ev.get('ppid', '?'):<8} {ev.get('comm', '?'):<16} {args:<50} {policy:<8}")
+
+      if file_events:
+          print(f"\n--- File Access Events ({len(file_events)} events) ---")
+          print(f"{'PID':<8} {'Comm':<16} {'Op':<8} {'Filename':<45} {'Env Vars':<25} {'Policy':<8}")
+          print("-" * 110)
+          for ev in file_events:
+              op = ev.get("operation", "open")
+              env_vars = ", ".join(ev.get("matched_env_vars", [])) or "."
+              policy = ev.get("policy", "")
+              blocked = ev.get("blocked", False)
+              marker = ">> " if blocked else "   "
+              fname = ev.get("filename", "?")
+              if len(fname) > 45:
+                  fname = "..." + fname[-42:]
+              print(f"{marker}{ev.get('pid', '?'):<5} {ev.get('comm', '?'):<16} {op:<8} {fname:<45} {env_vars:<25} {policy:<8}")
+
+      blocked_net = [e for e in network if e.get("policy") == "block"]
+      blocked_proc = [e for e in process if e.get("policy") == "block"]
+      blocked_files = [e for e in file_events if e.get("blocked")]
+
+      if blocked_net or blocked_proc or blocked_files:
+          print(f"\n{'=' * 70}")
+          print("  BLOCKED EVENTS SUMMARY")
+          print(f"{'=' * 70}")
+          if blocked_net:
+              print(f"\n  Network ({len(blocked_net)} blocked):")
+              for ev in blocked_net:
+                  domains = ", ".join(ev.get("domains", [])) or ev.get("daddr", "?")
+                  print(f"    - {ev.get('task_name', '?')} -> {domains}:{ev.get('dport', '?')} ({ev.get('proto', '?')})")
+          if blocked_proc:
+              print(f"\n  Process ({len(blocked_proc)} blocked):")
+              for ev in blocked_proc:
+                  ancestors = " > ".join(ev.get("ancestors", []))
+                  chain = f" (chain: {ancestors})" if ancestors else ""
+                  print(f"    - {ev.get('comm', '?')} [pid:{ev.get('pid', '?')}]{chain}")
+          if blocked_files:
+              print(f"\n  File ({len(blocked_files)} blocked):")
+              for ev in blocked_files:
+                  print(f"    - {ev.get('comm', '?')} -> {ev.get('filename', '?')}")
+          print()
+      PYEOF
+      else
+        echo "No kntrl report file found or file is empty."
+      fi
+
+      exit ${EXIT_CODE}
+  artifacts:
+    paths:
+      - /tmp/kntrl-report.json
+    expire_in: 30 days
+    when: always

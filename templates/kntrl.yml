@@ -1,0 +1,177 @@
+spec:
+  inputs:
+    # ─────────────────────────────────────────────
+    # General
+    # ─────────────────────────────────────────────
+    mode:
+      description: "Operating mode: 'monitor' (log only) or 'trace' (enforce/block)"
+      default: "monitor"
+    kntrl_version:
+      description: "kntrl release version to install (e.g. 'v0.5.0'). Defaults to 'v0.1.15'."
+      default: "v0.1.15"
+
+    # ─────────────────────────────────────────────
+    # Cloud (optional)
+    # ─────────────────────────────────────────────
+    api_url:
+      description: "kntrl Cloud API URL for centralized reporting"
+      default: ""
+    api_key:
+      description: "kntrl Cloud API key for authentication"
+      default: ""
+
+    # ─────────────────────────────────────────────
+    # Default rules toggles
+    # ─────────────────────────────────────────────
+    enable_default_network_rules:
+      description: "Enable built-in network allowlist (npm, PyPI, GitHub, GitLab, CDN hosts)"
+      default: "true"
+    enable_default_process_rules:
+      description: "Enable built-in process blocking (blocked chains and executables)"
+      default: "true"
+    enable_default_dns_rules:
+      description: "Enable built-in DNS server allowlist (Google, Cloudflare)"
+      default: "true"
+    enable_default_file_rules:
+      description: "Enable built-in file monitoring (secrets, credentials, SSH keys)"
+      default: "true"
+    enable_default_supply_chain_rego:
+      description: "Enable built-in OPA supply chain protection rules"
+      default: "true"
+
+    # ─────────────────────────────────────────────
+    # Network overrides
+    # ─────────────────────────────────────────────
+    allowed_hosts:
+      description: "Additional allowed hostnames (comma-separated)"
+      default: ""
+    allowed_ips:
+      description: "Additional allowed IP addresses or CIDRs (comma-separated)"
+      default: ""
+    allow_local_ranges:
+      description: "Allow RFC 1918 private ranges"
+      default: "true"
+    allow_gitlab_meta:
+      description: "Dynamically allow GitLab CI infrastructure IPs"
+      default: "true"
+    allow_metadata:
+      description: "Allow cloud metadata endpoints (169.254.169.254, 168.63.129.16)"
+      default: "false"
+
+    # ─────────────────────────────────────────────
+    # Process overrides
+    # ─────────────────────────────────────────────
+    extra_blocked_executables:
+      description: "Additional executables to block (comma-separated)"
+      default: ""
+
+    # ─────────────────────────────────────────────
+    # File overrides
+    # ─────────────────────────────────────────────
+    extra_monitored_paths:
+      description: "Additional file paths to monitor (comma-separated)"
+      default: ""
+    extra_protected_paths:
+      description: "Additional file paths to protect from writes (comma-separated)"
+      default: ""
+    extra_monitored_env_vars:
+      description: "Additional environment variables to monitor (comma-separated)"
+      default: ""
+
+    # ─────────────────────────────────────────────
+    # Custom rules
+    # ─────────────────────────────────────────────
+    custom_rules_file:
+      description: "Path to a custom YAML rules file (merged with defaults)"
+      default: ""
+    custom_rules_dir:
+      description: "Path to a directory containing custom .yaml and/or .rego files"
+      default: ""
+    custom_rego_file:
+      description: "Path to a custom .rego file to include alongside defaults"
+      default: ""
+
+    # ─────────────────────────────────────────────
+    # Network profiles (JSON)
+    # ─────────────────────────────────────────────
+    network_profiles:
+      description: "JSON array of per-process network profiles"
+      default: ""
+
+    # ─────────────────────────────────────────────
+    # Process blocked chains (JSON)
+    # ─────────────────────────────────────────────
+    extra_blocked_chains:
+      description: "JSON array of additional process blocked chains"
+      default: ""
+
+    # ─────────────────────────────────────────────
+    # Stage configuration
+    # ─────────────────────────────────────────────
+    stage:
+      description: "GitLab CI stage for the kntrl jobs"
+      default: ".pre"
+    stop_stage:
+      description: "GitLab CI stage for the kntrl stop job"
+      default: ".post"
+
+---
+
+# ══════════════════════════════════════════════════════════
+# kntrl — Runtime Security for GitLab CI/CD
+# eBPF-based agent that monitors and enforces network,
+# process, DNS, and file policies in CI pipelines.
+#
+# Author: Invicti / Kondukto
+# ══════════════════════════════════════════════════════════
+
+.kntrl-start:
+  stage: $[[ inputs.stage ]]
+  image: ubuntu:22.04@sha256:c9672795a48854502d9dc0f1b719ac36dd99259a2f8ce425904a5cb4ae0d60d2
+  variables:
+    KNTRL_VERSION: $[[ inputs.kntrl_version ]]
+    KNTRL_MODE: $[[ inputs.mode ]]
+    KNTRL_API_URL: $[[ inputs.api_url ]]
+    KNTRL_API_KEY: $[[ inputs.api_key ]]
+    KNTRL_ENABLE_DEFAULT_NETWORK_RULES: $[[ inputs.enable_default_network_rules ]]
+    KNTRL_ENABLE_DEFAULT_PROCESS_RULES: $[[ inputs.enable_default_process_rules ]]
+    KNTRL_ENABLE_DEFAULT_DNS_RULES: $[[ inputs.enable_default_dns_rules ]]
+    KNTRL_ENABLE_DEFAULT_FILE_RULES: $[[ inputs.enable_default_file_rules ]]
+    KNTRL_ENABLE_DEFAULT_SUPPLY_CHAIN_REGO: $[[ inputs.enable_default_supply_chain_rego ]]
+    KNTRL_ALLOWED_HOSTS: $[[ inputs.allowed_hosts ]]
+    KNTRL_ALLOWED_IPS: $[[ inputs.allowed_ips ]]
+    KNTRL_ALLOW_LOCAL_RANGES: $[[ inputs.allow_local_ranges ]]
+    KNTRL_ALLOW_GITLAB_META: $[[ inputs.allow_gitlab_meta ]]
+    KNTRL_ALLOW_METADATA: $[[ inputs.allow_metadata ]]
+    KNTRL_EXTRA_BLOCKED_EXECUTABLES: $[[ inputs.extra_blocked_executables ]]
+    KNTRL_EXTRA_MONITORED_PATHS: $[[ inputs.extra_monitored_paths ]]
+    KNTRL_EXTRA_PROTECTED_PATHS: $[[ inputs.extra_protected_paths ]]
+    KNTRL_EXTRA_MONITORED_ENV_VARS: $[[ inputs.extra_monitored_env_vars ]]
+    KNTRL_CUSTOM_RULES_FILE: $[[ inputs.custom_rules_file ]]
+    KNTRL_CUSTOM_RULES_DIR: $[[ inputs.custom_rules_dir ]]
+    KNTRL_CUSTOM_REGO_FILE: $[[ inputs.custom_rego_file ]]
+    KNTRL_NETWORK_PROFILES: $[[ inputs.network_profiles ]]
+    KNTRL_EXTRA_BLOCKED_CHAINS: $[[ inputs.extra_blocked_chains ]]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl python3 > /dev/null 2>&1
+  script:
+    - bash "${CI_PROJECT_DIR}/scripts/install.sh"
+    - bash "${CI_PROJECT_DIR}/scripts/build-rules.sh"
+    - bash "${CI_PROJECT_DIR}/scripts/start.sh"
+  artifacts:
+    paths:
+      - /var/run/kntrl.pid
+    expire_in: 1 hour
+
+.kntrl-stop:
+  stage: $[[ inputs.stop_stage ]]
+  variables:
+    KNTRL_REPORT_FILE: /tmp/kntrl-report.json
+  script:
+    - bash "${CI_PROJECT_DIR}/scripts/stop-and-report.sh"
+  when: always
+  artifacts:
+    paths:
+      - /tmp/kntrl-report.json
+    expire_in: 30 days
+    when: always

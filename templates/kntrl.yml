@@ -7,8 +7,8 @@ spec:
       description: "Operating mode: 'monitor' (log only) or 'trace' (enforce/block)"
       default: "monitor"
     kntrl_version:
-      description: "kntrl release version to install (e.g. 'v0.5.0'). Defaults to 'v0.1.15'."
-      default: "v0.1.15"
+      description: "kntrl release version to install (e.g. 'v0.5.0'). Defaults to 'v0.2.1'."
+      default: "v0.2.1"
 
     # ─────────────────────────────────────────────
     # Cloud (optional)
